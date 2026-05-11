@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+logs/
+data/
+New_Data_Engineer_Learning_Plan.md
+.DS_Store

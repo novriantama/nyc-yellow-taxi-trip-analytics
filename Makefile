@@ -1,4 +1,4 @@
-.PHONY: help download-data up down logs
+.PHONY: help download-data up down logs rebuild run-batch
 
 help:
 	@echo "Available commands:"
@@ -6,6 +6,8 @@ help:
 	@echo "  make up             - Starts all Docker containers in detached mode"
 	@echo "  make down           - Stops and removes all Docker containers"
 	@echo "  make logs           - View logs of all Docker containers"
+	@echo "  make rebuild        - Rebuilds Docker images and starts containers"
+	@echo "  make run-batch      - Runs PySpark batch processing job to MinIO"
 
 download-data:
 	@echo "Downloading dataset from Kaggle..."
@@ -24,3 +26,11 @@ down:
 
 logs:
 	docker compose logs -f
+
+rebuild: down
+	docker compose up -d --build
+	@echo "Containers rebuilt and started!"
+
+run-batch:
+	@echo "Submitting PySpark batch job to Spark Master..."
+	docker compose exec spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077 /opt/spark/jobs/batch_processing.py
