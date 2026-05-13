@@ -195,11 +195,45 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
+  # ======================================
+  # APACHE SUPERSET
+  # ======================================
+  superset-init:
+    image: apache/superset:latest
+    environment:
+      - SUPERSET_SECRET_KEY=${SUPERSET_SECRET_KEY:-my_super_secret_key_12345_for_superset}
+    volumes:
+      - superset-data:/app/superset_home
+    command: >
+      /bin/sh -c "
+        superset db upgrade &&
+        superset fab create-admin --username admin --firstname Admin --lastname Admin --email admin@example.com --password admin || true &&
+        superset init
+      "
+    networks:
+      - default_net
+
+  superset:
+    image: apache/superset:latest
+    ports:
+      - "${SUPERSET_PORT:-8088}:8088"
+    environment:
+      - SUPERSET_SECRET_KEY=${SUPERSET_SECRET_KEY:-my_super_secret_key_12345_for_superset}
+    volumes:
+      - superset-data:/app/superset_home
+    depends_on:
+      superset-init:
+        condition: service_completed_successfully
+      postgres-dwh:
+        condition: service_started
+    networks:
+      - default_net
 
 volumes:
   postgres-db-volume:
   postgres-dwh-volume:
   minio-data:
+  superset-data:
 
 networks:
   default_net:
