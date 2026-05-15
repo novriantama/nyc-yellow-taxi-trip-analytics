@@ -1,12 +1,13 @@
 import argparse
 import sys
+import os
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
-    col, year, month, dayofweek, date_format, hour, 
+    col, year, month, quarter, dayofmonth, dayofweek, date_format, hour, minute,
     unix_timestamp, monotonically_increasing_id, lit,
-    when, date_trunc
+    when, to_date
 )
-from pyspark.sql.types import IntegerType, BooleanType
+from pyspark.sql.types import IntegerType, BooleanType, DecimalType
 
 def main():
     parser = argparse.ArgumentParser(description="NYC Taxi Data Warehouse ETL")
@@ -14,6 +15,8 @@ def main():
     parser.add_argument('--month', required=True, help="Month to process (e.g., 03)")
     args = parser.parse_args()
 
+    # year_str = args.year
+    # month_str = str(args.month).zfill(2)
     year_str = "2016"
     month_str = "03"
 
@@ -29,10 +32,10 @@ def main():
         .getOrCreate()
 
     # DWH Connection Properties
-    jdbc_url = "jdbc:postgresql://postgres-dwh:5432/nyctaxi_dwh"
+    jdbc_url = f"jdbc:postgresql://postgres-dwh:{os.environ.get('DWH_PORT')}/{os.environ.get('DWH_DATABASE_DB')}"
     db_properties = {
-        "user": "dwhuser",
-        "password": "dwhpassword",
+        "user": os.environ.get("DWH_DATABASE_USER"),
+        "password": os.environ.get("DWH_DATABASE_PASSWORD"),
         "driver": "org.postgresql.Driver"
     }
 
@@ -52,7 +55,7 @@ def main():
         (1, 1, "Creative Mobile Technologies"),
         (2, 2, "VeriFone Inc.")
     ]
-    dim_vendor = spark.createDataFrame(vendor_data, ["vendor_id", "vendor_code", "vendor_name"])
+    dim_vendor = spark.createDataFrame(vendor_data, ["vendor_sk", "vendor_id", "vendor_name"])
 
     # 2. dim_rate_code
     rate_code_data = [
@@ -63,7 +66,7 @@ def main():
         (5, 5, "Negotiated fare"),
         (6, 6, "Group ride")
     ]
-    dim_rate_code = spark.createDataFrame(rate_code_data, ["rate_code_id", "rate_code", "rate_code_description"])
+    dim_rate_code = spark.createDataFrame(rate_code_data, ["rate_code_sk", "rate_code_id", "rate_description"])
 
     # 3. dim_payment_type
     payment_type_data = [
@@ -74,60 +77,68 @@ def main():
         (5, 5, "Unknown"),
         (6, 6, "Voided trip")
     ]
-    dim_payment_type = spark.createDataFrame(payment_type_data, ["payment_type_id", "payment_type", "payment_description"])
+    dim_payment_type = spark.createDataFrame(payment_type_data, ["payment_type_sk", "payment_type_id", "payment_description"])
 
-    # 4. dim_datetime
+    # 4. dim_date and dim_time
     # Extract unique datetimes from both pickup and dropoff
     pickup_dt = df.select(col("tpep_pickup_datetime").alias("datetime_val"))
     dropoff_dt = df.select(col("tpep_dropoff_datetime").alias("datetime_val"))
     
     distinct_dt = pickup_dt.union(dropoff_dt).distinct().dropna()
 
-    dim_datetime = distinct_dt.select(
-        date_format(col("datetime_val"), "yyyyMMddHHmmss").cast(IntegerType()).alias("datetime_id"),
-        date_trunc("day", col("datetime_val")).alias("full_date"),
-        hour(col("datetime_val")).alias("hour"),
-        dayofweek(col("datetime_val")).alias("day_of_week"),
-        date_format(col("datetime_val"), "EEEE").alias("day_name"),
-        when(dayofweek(col("datetime_val")).isin([1, 7]), lit(True)).otherwise(lit(False)).alias("is_weekend"),
-        month(col("datetime_val")).alias("month"),
+    dim_date = distinct_dt.select(
+        date_format(col("datetime_val"), "yyyyMMdd").cast(IntegerType()).alias("date_sk"),
+        to_date(col("datetime_val")).alias("full_date"),
         year(col("datetime_val")).alias("year"),
-        col("datetime_val")
-    )
+        quarter(col("datetime_val")).alias("quarter"),
+        month(col("datetime_val")).alias("month"),
+        dayofmonth(col("datetime_val")).alias("day_of_month"),
+        date_format(col("datetime_val"), "EEEE").alias("day_of_week"),
+        when(dayofweek(col("datetime_val")).isin([1, 7]), lit(True)).otherwise(lit(False)).alias("is_weekend")
+    ).distinct()
+
+    dim_time = distinct_dt.select(
+        date_format(col("datetime_val"), "HHmmss").cast(IntegerType()).alias("time_sk"),
+        date_format(col("datetime_val"), "HH:mm:ss").alias("time_of_day_full"),
+        hour(col("datetime_val")).alias("hour"),
+        minute(col("datetime_val")).alias("minute"),
+        when((hour(col("datetime_val")) >= 5) & (hour(col("datetime_val")) < 12), lit("Morning"))
+        .when((hour(col("datetime_val")) >= 12) & (hour(col("datetime_val")) < 17), lit("Afternoon"))
+        .when((hour(col("datetime_val")) >= 17) & (hour(col("datetime_val")) < 21), lit("Evening"))
+        .otherwise(lit("Night")).alias("time_block")
+    ).distinct()
 
     print("Building Fact Table...")
-
-    # Join to get datetime_ids and calculate duration
-    fact_trips = df.withColumn("trip_id", monotonically_increasing_id()) \
-        .withColumn("pickup_datetime_id", date_format(col("tpep_pickup_datetime"), "yyyyMMddHHmmss").cast(IntegerType())) \
-        .withColumn("dropoff_datetime_id", date_format(col("tpep_dropoff_datetime"), "yyyyMMddHHmmss").cast(IntegerType())) \
-        .withColumn("trip_duration_seconds", 
-                    unix_timestamp(col("tpep_dropoff_datetime")) - unix_timestamp(col("tpep_pickup_datetime")))
-
-    # Select final columns for fact table
-    fact_trips = fact_trips.select(
-        col("trip_id"),
-        col("VendorID").alias("vendor_id"),
-        col("pickup_datetime_id"),
-        col("dropoff_datetime_id"),
-        col("RatecodeID").alias("rate_code_id"),
-        col("payment_type").alias("payment_type_id"),
-        col("store_and_fwd_flag"),
-        col("pickup_longitude"),
-        col("pickup_latitude"),
-        col("dropoff_longitude"),
-        col("dropoff_latitude"),
-        col("passenger_count"),
-        col("trip_distance"),
-        col("fare_amount"),
-        col("extra"),
-        col("mta_tax"),
-        col("improvement_surcharge"),
-        col("tip_amount"),
-        col("tolls_amount"),
-        col("total_amount"),
-        col("trip_duration_seconds")
-    )
+    
+    fact_trip = df.withColumn("trip_id", monotonically_increasing_id()) \
+        .withColumn("pickup_date_sk", date_format(col("tpep_pickup_datetime"), "yyyyMMdd").cast(IntegerType())) \
+        .withColumn("pickup_time_sk", date_format(col("tpep_pickup_datetime"), "HHmmss").cast(IntegerType())) \
+        .withColumn("dropoff_date_sk", date_format(col("tpep_dropoff_datetime"), "yyyyMMdd").cast(IntegerType())) \
+        .withColumn("dropoff_time_sk", date_format(col("tpep_dropoff_datetime"), "HHmmss").cast(IntegerType())) \
+        .select(
+            col("trip_id"),
+            col("VendorID").alias("vendor_sk"),
+            col("pickup_date_sk"),
+            col("pickup_time_sk"),
+            col("dropoff_date_sk"),
+            col("dropoff_time_sk"),
+            col("RatecodeID").alias("rate_code_sk"),
+            col("payment_type").alias("payment_type_sk"),
+            col("store_and_fwd_flag"),
+            col("pickup_longitude").cast("decimal(9,6)"),
+            col("pickup_latitude").cast("decimal(9,6)"),
+            col("dropoff_longitude").cast("decimal(9,6)"),
+            col("dropoff_latitude").cast("decimal(9,6)"),
+            col("passenger_count").cast(IntegerType()),
+            col("trip_distance").cast("decimal(10,2)"),
+            col("fare_amount").cast("decimal(10,2)"),
+            col("extra").cast("decimal(10,2)"),
+            col("mta_tax").cast("decimal(10,2)"),
+            col("tip_amount").cast("decimal(10,2)"),
+            col("tolls_amount").cast("decimal(10,2)"),
+            col("improvement_surcharge").cast("decimal(10,2)"),
+            col("total_amount").cast("decimal(10,2)")
+        )
 
     print("Writing to Data Warehouse (PostgreSQL)...")
 
@@ -141,14 +152,15 @@ def main():
     print("Writing dim_payment_type...")
     dim_payment_type.write.jdbc(url=jdbc_url, table="dim_payment_type", mode="overwrite", properties=db_properties)
 
-    print("Writing dim_datetime...")
-    # Drop datetime_val used for intermediate join before writing
-    dim_datetime_out = dim_datetime.drop("datetime_val")
-    dim_datetime_out.write.jdbc(url=jdbc_url, table="dim_datetime", mode="overwrite", properties=db_properties)
+    print("Writing dim_date...")
+    dim_date.write.jdbc(url=jdbc_url, table="dim_date", mode="overwrite", properties=db_properties)
 
-    print("Writing fact_trips...")
+    print("Writing dim_time...")
+    dim_time.write.jdbc(url=jdbc_url, table="dim_time", mode="overwrite", properties=db_properties)
+
+    print("Writing fact_trip...")
     # Use append mode or overwrite. Overwrite will replace everything, suitable for a complete reload.
-    fact_trips.write.jdbc(url=jdbc_url, table="fact_trips", mode="overwrite", properties=db_properties)
+    fact_trip.write.jdbc(url=jdbc_url, table="fact_trip", mode="overwrite", properties=db_properties)
 
     print("DWH ETL completed successfully!")
     spark.stop()
