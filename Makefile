@@ -33,4 +33,8 @@ rebuild: down
 
 run-batch:
 	@echo "Submitting PySpark batch job to Spark Master..."
-	docker compose exec spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077 /opt/spark/jobs/batch_processing.py
+	docker compose exec spark-master /opt/spark/bin/spark-submit --conf spark.jars.ivy=/tmp/.ivy2 --master spark://spark-master:7077 /opt/spark/jobs/batch_processing.py
+
+run-stream:
+	@echo "Submitting PySpark Streaming job to Spark Master..."
+	docker compose exec spark-master /opt/spark/bin/spark-submit --conf spark.jars.ivy=/tmp/.ivy2 --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1 --master spark://spark-master:7077 /opt/spark/jobs/streaming_etl.py
