@@ -32,46 +32,44 @@ def process_micro_batch(df, epoch_id, spark, jdbc_url, db_properties, s3_path):
         when(dayofweek(col("datetime_val")).isin([1, 7]), lit(True)).otherwise(lit(False)).alias("is_weekend")
     ).distinct()
 
-    new_dim_time = distinct_dt.select(
-        date_format(col("datetime_val"), "HHmmss").cast(IntegerType()).alias("time_sk"),
-        date_format(col("datetime_val"), "HH:mm:ss").alias("time_of_day_full"),
-        hour(col("datetime_val")).alias("hour"),
-        minute(col("datetime_val")).alias("minute"),
-        when((hour(col("datetime_val")) >= 5) & (hour(col("datetime_val")) < 12), lit("Morning"))
-        .when((hour(col("datetime_val")) >= 12) & (hour(col("datetime_val")) < 17), lit("Afternoon"))
-        .when((hour(col("datetime_val")) >= 17) & (hour(col("datetime_val")) < 21), lit("Evening"))
-        .otherwise(lit("Night")).alias("time_block")
-    ).distinct()
-
-    # Load existing dims, union with new, drop duplicates, then overwrite to maintain historical dimension keys safely
+    dim_date_types = "date_sk INTEGER, full_date DATE, year INTEGER, quarter INTEGER, month INTEGER, day_of_month INTEGER, day_of_week VARCHAR(20), is_weekend BOOLEAN"
     try:
         existing_dim_date = spark.read.jdbc(url=jdbc_url, table="dim_date", properties=db_properties)
-        combined_dim_date = existing_dim_date.unionByName(new_dim_date, allowMissingColumns=True).distinct()
+        # Only append dates that don't already exist in the database
+        dates_to_append = new_dim_date.join(existing_dim_date, "date_sk", "left_anti")
+        if dates_to_append.count() > 0:
+            dates_to_append.write.jdbc(url=jdbc_url, table="dim_date", mode="append", properties=db_properties)
     except Exception:
-        combined_dim_date = new_dim_date
-    
-    try:
-        existing_dim_time = spark.read.jdbc(url=jdbc_url, table="dim_time", properties=db_properties)
-        combined_dim_time = existing_dim_time.unionByName(new_dim_time, allowMissingColumns=True).distinct()
-    except Exception:
-        combined_dim_time = new_dim_time
-
-    combined_dim_date.write.jdbc(url=jdbc_url, table="dim_date", mode="overwrite", properties=db_properties)
-    combined_dim_time.write.jdbc(url=jdbc_url, table="dim_time", mode="overwrite", properties=db_properties)
+        # Table doesn't exist yet, create it
+        new_dim_date.write.option("createTableColumnTypes", dim_date_types).jdbc(url=jdbc_url, table="dim_date", mode="overwrite", properties=db_properties)
 
     # 3. Create Fact Table
     fact_trip = df.withColumn("trip_id", monotonically_increasing_id()) \
         .withColumn("pickup_date_sk", date_format(col("tpep_pickup_datetime"), "yyyyMMdd").cast(IntegerType())) \
-        .withColumn("pickup_time_sk", date_format(col("tpep_pickup_datetime"), "HHmmss").cast(IntegerType())) \
+        .withColumn("pickup_time_block_sk", 
+            when((hour(col("tpep_pickup_datetime")) >= 5) & (hour(col("tpep_pickup_datetime")) < 12), lit(1))
+            .when((hour(col("tpep_pickup_datetime")) >= 12) & (hour(col("tpep_pickup_datetime")) < 17), lit(2))
+            .when((hour(col("tpep_pickup_datetime")) >= 17) & (hour(col("tpep_pickup_datetime")) < 21), lit(3))
+            .otherwise(lit(4))
+        ) \
         .withColumn("dropoff_date_sk", date_format(col("tpep_dropoff_datetime"), "yyyyMMdd").cast(IntegerType())) \
-        .withColumn("dropoff_time_sk", date_format(col("tpep_dropoff_datetime"), "HHmmss").cast(IntegerType())) \
+        .withColumn("dropoff_time_block_sk", 
+            when((hour(col("tpep_dropoff_datetime")) >= 5) & (hour(col("tpep_dropoff_datetime")) < 12), lit(1))
+            .when((hour(col("tpep_dropoff_datetime")) >= 12) & (hour(col("tpep_dropoff_datetime")) < 17), lit(2))
+            .when((hour(col("tpep_dropoff_datetime")) >= 17) & (hour(col("tpep_dropoff_datetime")) < 21), lit(3))
+            .otherwise(lit(4))
+        ) \
+        .withColumn("exact_pickup_time", col("tpep_pickup_datetime").cast("timestamp")) \
+        .withColumn("exact_dropoff_time", col("tpep_dropoff_datetime").cast("timestamp")) \
         .select(
             col("trip_id"),
             col("VendorID").cast(IntegerType()).alias("vendor_sk"),
             col("pickup_date_sk"),
-            col("pickup_time_sk"),
+            col("pickup_time_block_sk"),
             col("dropoff_date_sk"),
-            col("dropoff_time_sk"),
+            col("dropoff_time_block_sk"),
+            col("exact_pickup_time"),
+            col("exact_dropoff_time"),
             col("RatecodeID").cast(IntegerType()).alias("rate_code_sk"),
             col("payment_type").cast(IntegerType()).alias("payment_type_sk"),
             col("store_and_fwd_flag"),
@@ -91,7 +89,8 @@ def process_micro_batch(df, epoch_id, spark, jdbc_url, db_properties, s3_path):
         )
 
     # Write fact table (append)
-    fact_trip.write.jdbc(url=jdbc_url, table="fact_trip", mode="append", properties=db_properties)
+    fact_trip_types = "trip_id BIGINT, vendor_sk INTEGER, pickup_date_sk INTEGER, pickup_time_block_sk INTEGER, dropoff_date_sk INTEGER, dropoff_time_block_sk INTEGER, exact_pickup_time TIMESTAMP, exact_dropoff_time TIMESTAMP, rate_code_sk INTEGER, payment_type_sk INTEGER, store_and_fwd_flag VARCHAR(1), pickup_longitude DECIMAL(9,6), pickup_latitude DECIMAL(9,6), dropoff_longitude DECIMAL(9,6), dropoff_latitude DECIMAL(9,6), passenger_count INTEGER, trip_distance DECIMAL(10,2), fare_amount DECIMAL(10,2), extra DECIMAL(10,2), mta_tax DECIMAL(10,2), tip_amount DECIMAL(10,2), tolls_amount DECIMAL(10,2), improvement_surcharge DECIMAL(10,2), total_amount DECIMAL(10,2)"
+    fact_trip.write.option("createTableColumnTypes", fact_trip_types).jdbc(url=jdbc_url, table="fact_trip", mode="append", properties=db_properties)
     print(f"Successfully processed and written micro-batch {epoch_id} to DWH and Data Lake.")
 
 def main():
@@ -157,6 +156,29 @@ def main():
     
     print("Starting Streaming Query...")
     
+    # Initialize static dimensions on startup to match DWH ETL
+    print("Initializing static dimensions...")
+    dim_vendor_types = "vendor_sk INTEGER, vendor_id INTEGER, vendor_name VARCHAR(255)"
+    dim_rate_code_types = "rate_code_sk INTEGER, rate_code_id INTEGER, rate_description VARCHAR(255)"
+    dim_payment_types = "payment_type_sk INTEGER, payment_type_id INTEGER, payment_description VARCHAR(255)"
+    dim_time_block_types = "time_block_sk INTEGER, time_block_name VARCHAR(20)"
+    
+    vendor_data = [(1, 1, "Creative Mobile Technologies"), (2, 2, "VeriFone Inc.")]
+    dim_vendor = spark.createDataFrame(vendor_data, ["vendor_sk", "vendor_id", "vendor_name"])
+    dim_vendor.write.option("createTableColumnTypes", dim_vendor_types).jdbc(url=jdbc_url, table="dim_vendor", mode="ignore", properties=db_properties)
+
+    rate_code_data = [(1, 1, "Standard rate"), (2, 2, "JFK"), (3, 3, "Newark"), (4, 4, "Nassau or Westchester"), (5, 5, "Negotiated fare"), (6, 6, "Group ride")]
+    dim_rate_code = spark.createDataFrame(rate_code_data, ["rate_code_sk", "rate_code_id", "rate_description"])
+    dim_rate_code.write.option("createTableColumnTypes", dim_rate_code_types).jdbc(url=jdbc_url, table="dim_rate_code", mode="ignore", properties=db_properties)
+
+    payment_type_data = [(1, 1, "Credit card"), (2, 2, "Cash"), (3, 3, "No charge"), (4, 4, "Dispute"), (5, 5, "Unknown"), (6, 6, "Voided trip")]
+    dim_payment_type = spark.createDataFrame(payment_type_data, ["payment_type_sk", "payment_type_id", "payment_description"])
+    dim_payment_type.write.option("createTableColumnTypes", dim_payment_types).jdbc(url=jdbc_url, table="dim_payment_type", mode="ignore", properties=db_properties)
+
+    time_block_data = [(1, "Morning"), (2, "Afternoon"), (3, "Evening"), (4, "Night")]
+    dim_time_block = spark.createDataFrame(time_block_data, ["time_block_sk", "time_block_name"])
+    dim_time_block.write.option("createTableColumnTypes", dim_time_block_types).jdbc(url=jdbc_url, table="dim_time_block", mode="ignore", properties=db_properties)
+
     # Process micro-batches
     query = parsed_df.writeStream \
         .foreachBatch(lambda df, epoch_id: process_micro_batch(df, epoch_id, spark, jdbc_url, db_properties, s3_path)) \

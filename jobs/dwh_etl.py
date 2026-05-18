@@ -97,33 +97,44 @@ def main():
         when(dayofweek(col("datetime_val")).isin([1, 7]), lit(True)).otherwise(lit(False)).alias("is_weekend")
     ).distinct()
 
-    dim_time = distinct_dt.select(
-        date_format(col("datetime_val"), "HHmmss").cast(IntegerType()).alias("time_sk"),
-        date_format(col("datetime_val"), "HH:mm:ss").alias("time_of_day_full"),
-        hour(col("datetime_val")).alias("hour"),
-        minute(col("datetime_val")).alias("minute"),
-        when((hour(col("datetime_val")) >= 5) & (hour(col("datetime_val")) < 12), lit("Morning"))
-        .when((hour(col("datetime_val")) >= 12) & (hour(col("datetime_val")) < 17), lit("Afternoon"))
-        .when((hour(col("datetime_val")) >= 17) & (hour(col("datetime_val")) < 21), lit("Evening"))
-        .otherwise(lit("Night")).alias("time_block")
-    ).distinct()
+    time_block_data = [
+        (1, "Morning"),
+        (2, "Afternoon"),
+        (3, "Evening"),
+        (4, "Night")
+    ]
+    dim_time_block = spark.createDataFrame(time_block_data, ["time_block_sk", "time_block_name"])
 
     print("Building Fact Table...")
     
     fact_trip = df.withColumn("trip_id", monotonically_increasing_id()) \
         .withColumn("pickup_date_sk", date_format(col("tpep_pickup_datetime"), "yyyyMMdd").cast(IntegerType())) \
-        .withColumn("pickup_time_sk", date_format(col("tpep_pickup_datetime"), "HHmmss").cast(IntegerType())) \
+        .withColumn("pickup_time_block_sk", 
+            when((hour(col("tpep_pickup_datetime")) >= 5) & (hour(col("tpep_pickup_datetime")) < 12), lit(1))
+            .when((hour(col("tpep_pickup_datetime")) >= 12) & (hour(col("tpep_pickup_datetime")) < 17), lit(2))
+            .when((hour(col("tpep_pickup_datetime")) >= 17) & (hour(col("tpep_pickup_datetime")) < 21), lit(3))
+            .otherwise(lit(4))
+        ) \
         .withColumn("dropoff_date_sk", date_format(col("tpep_dropoff_datetime"), "yyyyMMdd").cast(IntegerType())) \
-        .withColumn("dropoff_time_sk", date_format(col("tpep_dropoff_datetime"), "HHmmss").cast(IntegerType())) \
+        .withColumn("dropoff_time_block_sk", 
+            when((hour(col("tpep_dropoff_datetime")) >= 5) & (hour(col("tpep_dropoff_datetime")) < 12), lit(1))
+            .when((hour(col("tpep_dropoff_datetime")) >= 12) & (hour(col("tpep_dropoff_datetime")) < 17), lit(2))
+            .when((hour(col("tpep_dropoff_datetime")) >= 17) & (hour(col("tpep_dropoff_datetime")) < 21), lit(3))
+            .otherwise(lit(4))
+        ) \
+        .withColumn("exact_pickup_time", col("tpep_pickup_datetime").cast("timestamp")) \
+        .withColumn("exact_dropoff_time", col("tpep_dropoff_datetime").cast("timestamp")) \
         .select(
             col("trip_id"),
-            col("VendorID").alias("vendor_sk"),
+            col("VendorID").cast(IntegerType()).alias("vendor_sk"),
             col("pickup_date_sk"),
-            col("pickup_time_sk"),
+            col("pickup_time_block_sk"),
             col("dropoff_date_sk"),
-            col("dropoff_time_sk"),
-            col("RatecodeID").alias("rate_code_sk"),
-            col("payment_type").alias("payment_type_sk"),
+            col("dropoff_time_block_sk"),
+            col("exact_pickup_time"),
+            col("exact_dropoff_time"),
+            col("RatecodeID").cast(IntegerType()).alias("rate_code_sk"),
+            col("payment_type").cast(IntegerType()).alias("payment_type_sk"),
             col("store_and_fwd_flag"),
             col("pickup_longitude").cast("decimal(9,6)"),
             col("pickup_latitude").cast("decimal(9,6)"),
@@ -142,25 +153,31 @@ def main():
 
     print("Writing to Data Warehouse (PostgreSQL)...")
 
+    dim_vendor_types = "vendor_sk INTEGER, vendor_id INTEGER, vendor_name VARCHAR(255)"
+    dim_rate_code_types = "rate_code_sk INTEGER, rate_code_id INTEGER, rate_description VARCHAR(255)"
+    dim_payment_types = "payment_type_sk INTEGER, payment_type_id INTEGER, payment_description VARCHAR(255)"
+    dim_date_types = "date_sk INTEGER, full_date DATE, year INTEGER, quarter INTEGER, month INTEGER, day_of_month INTEGER, day_of_week VARCHAR(20), is_weekend BOOLEAN"
+    dim_time_block_types = "time_block_sk INTEGER, time_block_name VARCHAR(20)"
+    fact_trip_types = "trip_id BIGINT, vendor_sk INTEGER, pickup_date_sk INTEGER, pickup_time_block_sk INTEGER, dropoff_date_sk INTEGER, dropoff_time_block_sk INTEGER, exact_pickup_time TIMESTAMP, exact_dropoff_time TIMESTAMP, rate_code_sk INTEGER, payment_type_sk INTEGER, store_and_fwd_flag VARCHAR(1), pickup_longitude DECIMAL(9,6), pickup_latitude DECIMAL(9,6), dropoff_longitude DECIMAL(9,6), dropoff_latitude DECIMAL(9,6), passenger_count INTEGER, trip_distance DECIMAL(10,2), fare_amount DECIMAL(10,2), extra DECIMAL(10,2), mta_tax DECIMAL(10,2), tip_amount DECIMAL(10,2), tolls_amount DECIMAL(10,2), improvement_surcharge DECIMAL(10,2), total_amount DECIMAL(10,2)"
+
     # Write Dimensions
     print("Writing dim_vendor...")
-    dim_vendor.write.jdbc(url=jdbc_url, table="dim_vendor", mode="overwrite", properties=db_properties)
+    dim_vendor.write.option("createTableColumnTypes", dim_vendor_types).jdbc(url=jdbc_url, table="dim_vendor", mode="overwrite", properties=db_properties)
     
     print("Writing dim_rate_code...")
-    dim_rate_code.write.jdbc(url=jdbc_url, table="dim_rate_code", mode="overwrite", properties=db_properties)
+    dim_rate_code.write.option("createTableColumnTypes", dim_rate_code_types).jdbc(url=jdbc_url, table="dim_rate_code", mode="overwrite", properties=db_properties)
     
     print("Writing dim_payment_type...")
-    dim_payment_type.write.jdbc(url=jdbc_url, table="dim_payment_type", mode="overwrite", properties=db_properties)
+    dim_payment_type.write.option("createTableColumnTypes", dim_payment_types).jdbc(url=jdbc_url, table="dim_payment_type", mode="overwrite", properties=db_properties)
 
     print("Writing dim_date...")
-    dim_date.write.jdbc(url=jdbc_url, table="dim_date", mode="overwrite", properties=db_properties)
+    dim_date.write.option("createTableColumnTypes", dim_date_types).jdbc(url=jdbc_url, table="dim_date", mode="overwrite", properties=db_properties)
 
-    print("Writing dim_time...")
-    dim_time.write.jdbc(url=jdbc_url, table="dim_time", mode="overwrite", properties=db_properties)
+    print("Writing dim_time_block...")
+    dim_time_block.write.option("createTableColumnTypes", dim_time_block_types).jdbc(url=jdbc_url, table="dim_time_block", mode="overwrite", properties=db_properties)
 
     print("Writing fact_trip...")
-    # Use append mode or overwrite. Overwrite will replace everything, suitable for a complete reload.
-    fact_trip.write.jdbc(url=jdbc_url, table="fact_trip", mode="overwrite", properties=db_properties)
+    fact_trip.write.option("createTableColumnTypes", fact_trip_types).jdbc(url=jdbc_url, table="fact_trip", mode="overwrite", properties=db_properties)
 
     print("DWH ETL completed successfully!")
     spark.stop()
