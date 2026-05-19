@@ -1,4 +1,5 @@
 import os
+import datetime
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, from_json, year, month, quarter, dayofmonth, dayofweek, date_format, hour, minute,
@@ -113,7 +114,12 @@ def main():
         "password": os.environ.get("DWH_DATABASE_PASSWORD", "dwhpassword"),
         "driver": "org.postgresql.Driver"
     }
-    s3_path = "s3a://nyc-taxi-data/yellow_tripdata_processed/stream/"
+    
+    current_date = datetime.datetime.now()
+    dummy_year = current_date.strftime("%Y")
+    dummy_month = current_date.strftime("%m")
+    dummy_day = current_date.strftime("%d")
+    s3_path = f"s3a://nyc-taxi-data/yellow_tripdata_processed/year={dummy_year}/month={dummy_month}/day={dummy_day}/"
 
     # JSON Schema
     schema = StructType([
