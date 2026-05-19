@@ -214,7 +214,10 @@ services:
   # APACHE SUPERSET
   # ======================================
   superset-init:
-    image: apache/superset:latest
+    build:
+      context: .
+      dockerfile: docker/superset/Dockerfile
+    image: nyc-yellow-taxi-trip-analytics-superset:latest
     environment:
       - SUPERSET_SECRET_KEY=${SUPERSET_SECRET_KEY}
     volumes:
@@ -229,7 +232,10 @@ services:
       - default_net
 
   superset:
-    image: apache/superset:latest
+    build:
+      context: .
+      dockerfile: docker/superset/Dockerfile
+    image: nyc-yellow-taxi-trip-analytics-superset:latest
     ports:
       - "${SUPERSET_PORT}:8088"
     environment:
