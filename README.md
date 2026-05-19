@@ -71,3 +71,94 @@ Once the containers are running, you can access the various UIs at the following
 ## Managing the App
 - `make logs`: View combined logs of all containers.
 - `make down`: Stop and remove all containers.
+
+## BI Dashboard Results
+
+The final stage of the pipeline visualizes the processed data using Apache Superset. The dashboard provides actionable insights into NYC Taxi operations, including geographic hotspots, demand patterns, executive KPIs, tipping behavior, and the relationship between trip distance and revenue. You can view the exported dashboard results in the [`yellow-taxi-nyc-2026-05-19T15-11-52.122Z.pdf`](./yellow-taxi-nyc-2026-05-19T15-11-52.122Z.pdf) file.
+
+Below are the key queries powering the dashboard visualizations:
+
+### 1. The Geographic Heatmap (Where are the hotspots?)
+Visualizes trip volume and average tip amounts across different coordinates to identify high-demand pickup locations.
+
+```sql
+SELECT 
+    pickup_longitude, 
+    pickup_latitude, 
+    COUNT(trip_id) AS trip_volume,
+    AVG(tip_amount) AS avg_tip
+FROM fact_trip
+WHERE pickup_longitude BETWEEN -74.3 AND -73.7 
+  AND pickup_latitude BETWEEN 40.5 AND 40.9
+GROUP BY 
+    pickup_longitude, 
+    pickup_latitude;
+```
+
+### 2. Time/Day Matrix Heatmap (When is the highest demand?)
+Analyzes peak hours and days of the week to show when taxi services are most requested.
+
+```sql
+SELECT 
+    dd.day_of_week, 
+    dtb.time_block_name, 
+    COUNT(ft.trip_id) AS total_trips
+FROM fact_trip ft
+INNER JOIN dim_date dd 
+    ON ft.pickup_date_sk = dd.date_sk
+INNER JOIN dim_time_block dtb 
+    ON ft.pickup_time_block_sk = dtb.time_block_sk
+GROUP BY 
+    dd.day_of_week, 
+    dtb.time_block_name;
+```
+
+### 3. Executive KPIs (The "Big Picture")
+Tracks high-level daily metrics including total trips, overall revenue, and average trip distance.
+
+```sql
+SELECT 
+    dd.full_date,
+    COUNT(ft.trip_id) AS total_trips,
+    SUM(ft.total_amount) AS total_revenue,
+    AVG(ft.trip_distance) AS avg_distance_miles
+FROM fact_trip ft
+INNER JOIN dim_date dd 
+    ON ft.pickup_date_sk = dd.date_sk
+GROUP BY 
+    dd.full_date;
+```
+
+### 4. Tipping Behavior by Payment Type
+Compares average tip amounts and percentages across different payment methods to understand passenger tipping habits.
+
+```sql
+SELECT 
+    dpt.payment_description,
+    AVG(ft.tip_amount) AS avg_tip_dollars,
+    -- Calculate Tip Percentage (avoiding divide-by-zero errors)
+    AVG(CASE WHEN ft.fare_amount > 0 THEN (ft.tip_amount / ft.fare_amount) * 100 ELSE 0 END) AS tip_percentage
+FROM fact_trip ft
+INNER JOIN dim_payment_type dpt 
+    ON ft.payment_type_sk = dpt.payment_type_sk
+GROUP BY 
+    dpt.payment_description
+ORDER BY 
+    avg_tip_dollars DESC;
+```
+
+### 5. Revenue vs. Distance Scatter Plot
+Explores the correlation between trip distance and fare amount, categorized by rate codes.
+
+```sql
+SELECT 
+    trip_distance,
+    fare_amount,
+    drc.rate_description
+FROM fact_trip ft
+INNER JOIN dim_rate_code drc 
+    ON ft.rate_code_sk = drc.rate_code_sk
+WHERE trip_distance < 50 
+  AND fare_amount < 200
+LIMIT 50000;
+```
