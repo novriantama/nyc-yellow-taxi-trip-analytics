@@ -21,7 +21,7 @@ def main():
 
     # The data directory is mounted to /opt/spark/data in the container
     input_file = "/opt/spark/data/yellow_tripdata_2016-03.csv"
-    output_path = "s3a://nyc-taxi-data/yellow_tripdata_processed/year=2016/month=03/"
+    output_path = "s3a://nyc-taxi-data/yellow_tripdata_processed/source=csv/year=2016/month=03/"
 
     print(f"Reading raw data from {input_file}...")
     df = spark.read.csv(input_file, header=True, inferSchema=True)

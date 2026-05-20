@@ -9,10 +9,17 @@ from pyspark.sql.types import (
     StructType, StructField, StringType, DoubleType, IntegerType
 )
 
-def process_micro_batch(df, epoch_id, spark, jdbc_url, db_properties, s3_path):
+def process_micro_batch(df, epoch_id, spark, jdbc_url, db_properties):
     print(f"Processing micro-batch {epoch_id} with {df.count()} records...")
     if df.isEmpty():
         return
+
+    # Dynamic partition based on current processing time
+    current_date = datetime.datetime.now()
+    dummy_year = current_date.strftime("%Y")
+    dummy_month = current_date.strftime("%m")
+    dummy_day = current_date.strftime("%d")
+    s3_path = f"s3a://nyc-taxi-data/yellow_tripdata_processed/source=stream/year={dummy_year}/month={dummy_month}/day={dummy_day}/"
 
     # 1. Write raw stream data to Data Lake (MinIO)
     df.write.mode("append").parquet(s3_path)
@@ -114,12 +121,6 @@ def main():
         "password": os.environ.get("DWH_DATABASE_PASSWORD", "dwhpassword"),
         "driver": "org.postgresql.Driver"
     }
-    
-    current_date = datetime.datetime.now()
-    dummy_year = current_date.strftime("%Y")
-    dummy_month = current_date.strftime("%m")
-    dummy_day = current_date.strftime("%d")
-    s3_path = f"s3a://nyc-taxi-data/yellow_tripdata_processed/year={dummy_year}/month={dummy_month}/day={dummy_day}/"
 
     # JSON Schema
     schema = StructType([
@@ -153,6 +154,7 @@ def main():
         .option("kafka.bootstrap.servers", kafka_broker) \
         .option("subscribe", "nyc_taxi_trips") \
         .option("startingOffsets", "latest") \
+        .option("failOnDataLoss", "false") \
         .load()
 
     # Parse JSON
@@ -187,8 +189,9 @@ def main():
 
     # Process micro-batches
     query = parsed_df.writeStream \
-        .foreachBatch(lambda df, epoch_id: process_micro_batch(df, epoch_id, spark, jdbc_url, db_properties, s3_path)) \
+        .foreachBatch(lambda df, epoch_id: process_micro_batch(df, epoch_id, spark, jdbc_url, db_properties)) \
         .outputMode("append") \
+        .option("checkpointLocation", "s3a://nyc-taxi-data/checkpoints/streaming_etl/") \
         .trigger(processingTime='10 seconds') \
         .start()
 

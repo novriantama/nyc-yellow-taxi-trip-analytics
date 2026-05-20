@@ -18,7 +18,7 @@ def main():
     # year_str = args.year
     # month_str = str(args.month).zfill(2)
     year_str = "2016"
-    month_str = "03"
+    month_str = "02"
 
     # Initialize SparkSession with S3 and Postgres JDBC support
     spark = SparkSession.builder \
@@ -39,7 +39,7 @@ def main():
         "driver": "org.postgresql.Driver"
     }
 
-    input_path = f"s3a://nyc-taxi-data/yellow_tripdata_processed/year={year_str}/month={month_str}/"
+    input_path = f"s3a://nyc-taxi-data/yellow_tripdata_processed/source=csv/year={year_str}/month={month_str}/"
     print(f"Reading processed data from {input_path}")
     
     try:
@@ -162,22 +162,28 @@ def main():
 
     # Write Dimensions
     print("Writing dim_vendor...")
-    dim_vendor.write.option("createTableColumnTypes", dim_vendor_types).jdbc(url=jdbc_url, table="dim_vendor", mode="overwrite", properties=db_properties)
+    dim_vendor.write.option("createTableColumnTypes", dim_vendor_types).jdbc(url=jdbc_url, table="dim_vendor", mode="ignore", properties=db_properties)
     
     print("Writing dim_rate_code...")
-    dim_rate_code.write.option("createTableColumnTypes", dim_rate_code_types).jdbc(url=jdbc_url, table="dim_rate_code", mode="overwrite", properties=db_properties)
+    dim_rate_code.write.option("createTableColumnTypes", dim_rate_code_types).jdbc(url=jdbc_url, table="dim_rate_code", mode="ignore", properties=db_properties)
     
     print("Writing dim_payment_type...")
-    dim_payment_type.write.option("createTableColumnTypes", dim_payment_types).jdbc(url=jdbc_url, table="dim_payment_type", mode="overwrite", properties=db_properties)
+    dim_payment_type.write.option("createTableColumnTypes", dim_payment_types).jdbc(url=jdbc_url, table="dim_payment_type", mode="ignore", properties=db_properties)
 
     print("Writing dim_date...")
-    dim_date.write.option("createTableColumnTypes", dim_date_types).jdbc(url=jdbc_url, table="dim_date", mode="overwrite", properties=db_properties)
+    try:
+        existing_dim_date = spark.read.jdbc(url=jdbc_url, table="dim_date", properties=db_properties)
+        dates_to_append = dim_date.join(existing_dim_date, "date_sk", "left_anti")
+        if dates_to_append.count() > 0:
+            dates_to_append.write.jdbc(url=jdbc_url, table="dim_date", mode="append", properties=db_properties)
+    except Exception:
+        dim_date.write.option("createTableColumnTypes", dim_date_types).jdbc(url=jdbc_url, table="dim_date", mode="overwrite", properties=db_properties)
 
     print("Writing dim_time_block...")
-    dim_time_block.write.option("createTableColumnTypes", dim_time_block_types).jdbc(url=jdbc_url, table="dim_time_block", mode="overwrite", properties=db_properties)
+    dim_time_block.write.option("createTableColumnTypes", dim_time_block_types).jdbc(url=jdbc_url, table="dim_time_block", mode="ignore", properties=db_properties)
 
     print("Writing fact_trip...")
-    fact_trip.write.option("createTableColumnTypes", fact_trip_types).jdbc(url=jdbc_url, table="fact_trip", mode="overwrite", properties=db_properties)
+    fact_trip.write.option("createTableColumnTypes", fact_trip_types).jdbc(url=jdbc_url, table="fact_trip", mode="append", properties=db_properties)
 
     print("DWH ETL completed successfully!")
     spark.stop()
